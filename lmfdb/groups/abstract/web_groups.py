@@ -3,7 +3,7 @@ import re
 
 from lmfdb import db
 
-from sage.all import factor, lazy_attribute, Permutations, SymmetricGroup
+from sage.all import factor, lazy_attribute, Permutations, SymmetricGroup, ZZ
 from sage.libs.gap.libgap import libgap
 
 fix_exponent_re = re.compile(r"\^(-\d+|\d\d+)")
@@ -53,6 +53,7 @@ class WebAbstractGroup(WebObj):
         # Should join with gps_groups to get pretty names for subgroup and quotient
         return {subdata['label']: WebAbstractSubgroup(subdata['label'], subdata) for subdata in db.gps_subgroups.search({'ambient': self.label})}
 
+
     # special subgroups
     def special_search(self, sp):
         search_lab = '%s.%s' % (self.label, sp)
@@ -78,8 +79,6 @@ class WebAbstractGroup(WebObj):
 
     # series
 
-    # TODO: fix this
-    # in abstract-show-group.html, series data has form {% for kwl, name, subs, spandata, symb in gp.series() %}
     def series_search(self, sp):
         ser_str = r"^%s.%s\d+" % (self.label, sp)
         ser_re = re.compile(ser_str)
@@ -90,7 +89,7 @@ class WebAbstractGroup(WebObj):
             for spec_lab in H.special_labels:
                 if ser_re.match(spec_lab):
                     #ser.append((H.subgroup, spec_lab)) # returning right thing?
-                    ser.append((H.label, spec_lab)) # returning right thing?
+                    ser.append((H.label, spec_lab))
         # sort
         def sort_ser(p, ch):
             return int(((p[1]).split(ch))[1])
@@ -157,7 +156,8 @@ class WebAbstractGroup(WebObj):
     def subgroup_layers(self):
         # Need to update to account for possibility of not having all inclusions
         subs = self.subgroups
-        top = max(sub.label for sub in subs.values())
+        topord = max(sub.subgroup_order for sub in subs.values())
+        top = [z.label for z in subs.values() if z.subgroup_order == topord][0]
         layers = [[subs[top]]]
         seen = set([top])
         added_something = True # prevent data error from causing infinite loop
@@ -177,24 +177,7 @@ class WebAbstractGroup(WebObj):
         for g in subs:
             for h in subs[g].contains:
                 edges.append([h, g])
-        #print [[gp.subgroup for gp in layer] for layer in layers]
         return [layers, edges]
-
-    # May not use anymore
-    @lazy_attribute
-    def subgroup_layer_by_order(self):
-        # Need to update to account for possibility of not having all inclusions
-        subs = self.subgroups
-        orders = list(set(sub.subgroup_order for sub in subs.values()))
-        layers = {j:[] for j in orders}
-        edges = []
-        for sub in subs.values():
-            layers[sub.subgroup_order].append(sub)
-            for k in sub.contained_in:
-                edges.append([k, sub.label])
-        llayers = [layers[k] for k in sorted(layers.keys())]
-        llayers = [[[gp.label, str(gp.subgroup_tex), str(gp.subgroup), gp.count] for gp in ll] for ll in llayers]
-        return [llayers, edges]
 
     def sylow_subgroups(self):
         """
@@ -210,7 +193,6 @@ class WebAbstractGroup(WebObj):
                 syl_list.append((p, syl_dict[p]))
         return syl_list
 
-    # TODO: update this to use series_search
     def series(self):
         data = [['group.%s'%ser,
                  ser.replace('_',' ').capitalize(),
@@ -252,7 +234,7 @@ class WebAbstractGroup(WebObj):
     def decode_as_perm(self, code):
         # code should be an integer with 0 <= m < factorial(n)
         n = -self.elt_rep_type
-        return SymmetricGroup(n)(Permutations(n).unrank(code))
+        return str(SymmetricGroup(n)(Permutations(n).unrank(code)))
 
     #@lazy_attribute
     #def fp_isom(self):
@@ -274,21 +256,99 @@ class WebAbstractGroup(WebObj):
     #            # g^r is not another generator
 
     def write_element(self, elt):
-        # Given an uncoded element, return a latex form for printing on the webpage.
+        # Given a decoded element or free group lift, return a latex form for printing on the webpage.
         if self.elt_rep_type == 0:
             s = str(elt)
-            for i in range(self.ngens):
+            for i in reversed(range(self.ngens)): # reversed so that we don't replace f1 in f10.
                 s = s.replace("f%s"%(i+1), chr(97+i))
             return s
 
-    # TODO: fix this. something weird happening to relators---something going wrong with the replace below
-    # see page for 32.30 for example
+    # TODO: is this the presentation we want?
     def presentation(self):
+        # chr(97) = "a"
         if self.elt_rep_type == 0:
-            relators = self.G.FamilyPcgs().IsomorphismFpGroupByPcgs("f").Image().RelatorsOfFpGroup()
-            gens = ', '.join(chr(97+i) for i in range(self.ngens))
-            relators = ', '.join(map(str, relators))
-            for i in range(self.ngens):
+            FP = self.G.FamilyPcgs().IsomorphismFpGroupByPcgs("f").Image()
+            F = FP.FreeGroupOfFpGroup()
+            Fgens = FP.FreeGeneratorsOfFpGroup()
+            used = self.gens_used
+            print("USED", used)
+            relator_lifts = FP.RelatorsOfFpGroup()
+            pure_powers = {}
+            rel_powers = {}
+            power_exp = {}
+            power_rhs = {}
+            conj = {}
+            for rel in relator_lifts:
+                m = rel.NumberSyllables()
+                a = ZZ(rel.GeneratorSyllable(1))
+                e = ZZ(rel.ExponentSyllable(1))
+                if m == 1:
+                    # pure power relation
+                    if a in power_exp:
+                        raise ValueError("Invalid internal pc presentation: two values for f%s^p" % g)
+                    power_exp[a] = e
+                    power_rhs[a] = F.One()
+                elif (m >= 4 and
+                      e == rel.ExponentSyllable(2) == -1 and
+                      rel.ExponentSyllable(3) == 1 and
+                      rel.GeneratorSyllable(3) == a):
+                    b = ZZ(rel.GeneratorSyllable(2))
+                    if not (m == 4 and rel.GeneratorSyllable(4) == b and rel.ExponentSyllable(4) == 1):
+                        # We omit pure commutator relations and explain below the presentation
+                        rhs = rel.SubSyllables(4, m)
+                        # started with a^-1 b^-1 a b X = 1, transformed to b^a = b X =: rhs
+                        if (b,a) in conj:
+                            raise ValueError("Invalid internal pc presentation: two values for f%s^f%s" % (b, a))
+                        conj[b,a] = rhs
+                else:
+                    # relative power relation
+                    if a in power_exp:
+                        raise ValueError("Invalid internal pc presentation: two values for f%s^p" % a)
+                    power_exp[a] = e
+                    power_rhs[a] = rel.SubSyllables(2,m)**-1
+                    if a+1 not in used and power_rhs[a] != Fgens[a]:
+                        raise ValueError("Invalid internal pc presentation: f%s^%s != f%s" % (a, e, a+1))
+            print("power_exp", power_exp)
+            print("power_rhs", power_rhs)
+            print("conj", conj)
+            rewrite = []
+            curpow = 1
+            curgen = 1
+            genenum = 0
+            genpow_rhs = []
+            genpow_exp = []
+            for i in sorted(power_exp):
+                # check that the values are contiguous
+                if not (i == 1 or i-1 in power_exp):
+                    raise ValueError("Invalid internal pc presentation: no value given for %s^p" % chr(96+i))
+                rewrite.append(Fgens[genenum]**curpow)
+                curpow *= power_exp[i]
+                if i == len(power_exp) or i+1 in used:
+                    genpow_rhs.append(power_rhs[i])
+                    genpow_exp.append(curpow)
+                    curgen = i+1
+                    genenum += 1
+                    curpow = 1
+            M = len(genpow_exp)
+            #if len(genpow_exp) != self.ngens:
+            #    raise ValueError("Invalid internal pc presentation: number of generators %s vs %s" % (len(genpow_exp), self.ngens))
+            hom = F.GroupHomomorphismByImagesNC(F, rewrite)
+            for i, (rhs, e) in enumerate(zip(genpow_rhs, genpow_exp)):
+                if rhs == F.One():
+                    pure_powers[i] = "%s^%s" % (chr(97+i), e)
+                else:
+                    rel_powers[i] = "%s^%s=%s" % (chr(97+i), e, hom.Image(rhs))
+            gens = ', '.join(chr(97+i) for i in range(M))
+            relators = []
+            if pure_powers:
+                relators.append("=".join(pure_powers[g] for g in sorted(pure_powers)) + "=1")
+            for g in sorted(rel_powers):
+                relators.append(rel_powers[g])
+            for a,b in sorted(conj):
+                if a in used and b in used:
+                    relators.append("%s^%s=%s" % (chr(97+used.index(a)), chr(97+used.index(b)), hom.Image(conj[a,b])))
+            relators = ', '.join(relators)
+            for i in reversed(range(M)):
                 relators = relators.replace("f%s"%(i+1), chr(97+i))
             relators = fix_exponent_re.sub(r"^{\1}", relators)
             relators = relators.replace("*","")
@@ -339,25 +399,36 @@ class WebAbstractGroup(WebObj):
     def out_order_factor(self):
         return factor(int(self._data['outer_order']))
 
+
     ###special subgroups
+    def cent(self):
+        return self._data['center']
 
-    def show_center_label(self):
-        return group_names_pretty(self.center_label)
+    def cent_label(self):
+        return group_names_pretty(self._data['center_label'])
 
-    def show_central_quotient(self):
-        return group_names_pretty(self.central_quotient)
+    def central_quot(self):
+        return group_names_pretty(self._data['central_quotient'])
+    
 
-    def show_commutator_label(self):
-        return group_names_pretty(self.commutator_label)
+    def comm(self):
+        return self._data['commutator']
 
-    def show_abelian_quotient(self):
-        return group_names_pretty(self.abelian_quotient)
+    def comm_label(self):
+        return group_names_pretty(self._data['commutator_label'])
 
-    def show_frattini_label(self):
-        return group_names_pretty(self.frattini_label)
+    def abelian_quot(self):
+        return group_names_pretty(self._data['abelian_quotient'])
 
-    def show_frattini_quotient(self):
-        return group_names_pretty(self.frattini_quotient)
+    def fratt(self):
+        return self._data['frattini']
+
+    def fratt_label(self):
+        return group_names_pretty(self._data['frattini_label'])
+
+    def frattini_quot(self):
+        return group_names_pretty(self._data['frattini_quotient'])
+    
 
 
 class WebAbstractSubgroup(WebObj):
